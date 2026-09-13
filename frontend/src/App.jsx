@@ -1,0 +1,2665 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { divIcon } from "leaflet";
+
+
+import {
+  MapContainer,
+  TileLayer,
+  Marker,
+  Popup,
+  useMapEvents,
+  useMap,
+  GeoJSON,
+  Polyline,
+} from "react-leaflet";
+
+import "leaflet/dist/leaflet.css";
+import "./App.css";
+
+
+const HYDERABAD_CENTER = [17.385, 78.4867];
+const HYDERABAD_BOUNDS = [
+  [17.2, 78.2],
+  [17.6, 78.7],
+];
+const SATELLITE_DATE = new Date(
+  Date.now() - 2 * 24 * 60 * 60 * 1000
+).toISOString().slice(0, 10);
+const NASA_GIBS_TILE_URL =
+  `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_NOAA20_CorrectedReflectance_TrueColor/default/${SATELLITE_DATE}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`;
+
+
+function isWithinHyderabad(latitude, longitude) {
+  return (
+    latitude >= HYDERABAD_BOUNDS[0][0] &&
+    latitude <= HYDERABAD_BOUNDS[1][0] &&
+    longitude >= HYDERABAD_BOUNDS[0][1] &&
+    longitude <= HYDERABAD_BOUNDS[1][1]
+  );
+}
+
+
+function MapViewController({
+  mapView,
+  keepHyderabadBounds,
+  routeCoordinates,
+}) {
+  const map = useMap();
+
+  useEffect(() => {
+    map.setMaxBounds(
+      keepHyderabadBounds ? HYDERABAD_BOUNDS : null
+    );
+    if (routeCoordinates?.length > 1) {
+      map.fitBounds(
+        routeCoordinates.map(([longitude, latitude]) => [
+          latitude,
+          longitude,
+        ]),
+        { padding: [40, 40] }
+      );
+    } else {
+      map.setView(mapView.center, mapView.zoom);
+    }
+  }, [keepHyderabadBounds, map, mapView, routeCoordinates]);
+
+  return null;
+}
+
+
+function getReportRoadStatus(severity) {
+  if (severity === "HIGH") {
+    return "BLOCKED (reported / prototype)";
+  }
+
+  if (severity === "MEDIUM") {
+    return "CAUTION / PASSABLE WITH CAUTION";
+  }
+
+  return "PASSABLE";
+}
+
+
+function createReportIcon(severity) {
+  return divIcon({
+    className: "report-marker-icon",
+    html: `<span class="report-marker ${severity.toLowerCase()}"></span>`,
+    iconSize: [24, 24],
+    iconAnchor: [12, 12],
+    popupAnchor: [0, -12],
+  });
+}
+
+
+// ------------------------------------
+// MAP LOCATION PICKER
+// ------------------------------------
+
+function LocationPicker({ onSelect }) {
+  useMapEvents({
+    click(e) {
+      onSelect([e.latlng.lat, e.latlng.lng]);
+    },
+  });
+
+  return null;
+}
+
+
+// ------------------------------------
+// MAIN APP
+// ------------------------------------
+
+function App() {
+
+  const hyderabad = HYDERABAD_CENTER;
+  const apiBaseUrl = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+
+
+  // ------------------------------------
+  // WEATHER
+  // ------------------------------------
+
+  const [rainfall, setRainfall] = useState(0);
+  const [rainProbability, setRainProbability] = useState(0);
+
+  useEffect(() => {
+
+    fetch(`${apiBaseUrl}/weather`)
+
+      .then((response) => response.json())
+
+      .then((data) => {
+
+        setRainfall(data.next_6_hours_rain);
+        setRainProbability(data.rain_probability);
+
+        console.log(
+          "Next 6 hours rain:",
+          data.next_6_hours_rain
+        );
+
+      })
+
+      .catch((error) => {
+
+        console.error(
+          "Weather connection failed:",
+          error
+        );
+
+      });
+
+  }, [apiBaseUrl]);
+
+
+  // ------------------------------------
+  // DESTINATION WEATHER
+  // ------------------------------------
+
+  const [destinationQuery, setDestinationQuery] = useState("");
+  const [destinationResults, setDestinationResults] = useState([]);
+  const [destinationWeather, setDestinationWeather] = useState(null);
+  const [destinationName, setDestinationName] = useState("");
+  const [selectedDestination, setSelectedDestination] = useState(null);
+  const [destinationStatus, setDestinationStatus] = useState("");
+  const [isSearchingDestination, setIsSearchingDestination] =
+    useState(false);
+  const [isLoadingDestinationWeather, setIsLoadingDestinationWeather] =
+    useState(false);
+  const [mapView, setMapView] = useState({
+    center: hyderabad,
+    zoom: 12,
+  });
+  const [mapMode, setMapMode] = useState("street");
+  const [satelliteStatus, setSatelliteStatus] = useState("");
+  const weatherCache = useRef(new Map());
+
+  // ------------------------------------
+  // ROUTE PLANNING
+  // ------------------------------------
+
+  const [routeStartQuery, setRouteStartQuery] = useState("");
+  const [routeEndQuery, setRouteEndQuery] = useState("");
+  const [routeStartResults, setRouteStartResults] = useState([]);
+  const [routeEndResults, setRouteEndResults] = useState([]);
+  const [routeStart, setRouteStart] = useState(null);
+  const [routeEnd, setRouteEnd] = useState(null);
+  const [routeRoutes, setRouteRoutes] = useState([]);
+  const [selectedRouteId, setSelectedRouteId] = useState(null);
+  const [recommendedRouteId, setRecommendedRouteId] = useState(null);
+  const [routeStatus, setRouteStatus] = useState("");
+  const [isSearchingRoute, setIsSearchingRoute] = useState(false);
+  const [isLoadingRoute, setIsLoadingRoute] = useState(false);
+
+  function getPlaceLabel(place) {
+    return [place.name, place.state, place.country]
+      .filter(Boolean)
+      .join(", ");
+  }
+
+  async function getCachedWeather(latitude, longitude) {
+    const key = `${Number(latitude).toFixed(4)},${Number(longitude).toFixed(4)}`;
+    const cachedWeather = weatherCache.current.get(key);
+
+    if (cachedWeather) {
+      return cachedWeather;
+    }
+
+    const response = await fetch(
+      `${apiBaseUrl}/weather?latitude=${encodeURIComponent(latitude)}&longitude=${encodeURIComponent(longitude)}`
+    );
+
+    if (!response.ok) {
+      throw new Error("Weather request failed");
+    }
+
+    const weather = await response.json();
+    weatherCache.current.set(key, weather);
+    return weather;
+  }
+
+  async function loadDestinationWeather(
+    latitude,
+    longitude,
+    name,
+    isCurrentLocation = false
+  ) {
+    if (!Number.isFinite(Number(latitude)) ||
+      !Number.isFinite(Number(longitude))) {
+      setDestinationStatus("This location has invalid coordinates.");
+      return;
+    }
+
+    const destination = {
+      name,
+      latitude: Number(latitude),
+      longitude: Number(longitude),
+      weather: null,
+      isCurrentLocation,
+    };
+
+    setIsLoadingDestinationWeather(true);
+    setDestinationStatus("");
+    setDestinationName(name);
+    setSelectedDestination(destination);
+    setMapView({
+      center: [destination.latitude, destination.longitude],
+      zoom: isWithinHyderabad(destination.latitude, destination.longitude)
+        ? 13
+        : 11,
+    });
+
+    try {
+      const data = await getCachedWeather(latitude, longitude);
+
+      setDestinationWeather(data);
+      setSelectedDestination({
+        ...destination,
+        weather: data,
+      });
+    } catch (error) {
+      console.error("Destination weather request failed:", error);
+      setDestinationWeather(null);
+      setDestinationStatus(
+        "We could not load weather for this location. Please try again."
+      );
+    } finally {
+      setIsLoadingDestinationWeather(false);
+    }
+  }
+
+  async function searchDestination(event) {
+    event.preventDefault();
+
+    const place = destinationQuery.trim();
+
+    if (!place) {
+      setDestinationResults([]);
+      setDestinationWeather(null);
+      setDestinationStatus("Enter a destination to search.");
+      return;
+    }
+
+    setIsSearchingDestination(true);
+    setDestinationResults([]);
+    setDestinationWeather(null);
+    setDestinationStatus("");
+
+    try {
+      const response = await fetch(
+        `${apiBaseUrl}/geocode?place=${encodeURIComponent(place)}`
+      );
+
+      if (!response.ok) {
+        throw new Error("Destination search failed");
+      }
+
+      const data = await response.json();
+      const results = data.results || [];
+
+      setDestinationResults(results);
+
+      if (results.length === 0) {
+        setDestinationStatus("No matching destinations were found.");
+      }
+    } catch (error) {
+      console.error("Destination search failed:", error);
+      setDestinationStatus(
+        "We could not search destinations right now. Please try again."
+      );
+    } finally {
+      setIsSearchingDestination(false);
+    }
+  }
+
+  function selectDestination(place) {
+    setDestinationResults([]);
+    loadDestinationWeather(
+      place.latitude,
+      place.longitude,
+      getPlaceLabel(place),
+      false
+    );
+  }
+
+  function useMyLocation() {
+    if (!navigator.geolocation) {
+      setDestinationStatus(
+        "Location services are not available in this browser."
+      );
+      return;
+    }
+
+    setDestinationResults([]);
+    setDestinationWeather(null);
+    setDestinationStatus("Requesting your location permission…");
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        loadDestinationWeather(
+          position.coords.latitude,
+          position.coords.longitude,
+          "Your current location",
+          true
+        );
+      },
+      (error) => {
+        console.error("Location request failed:", error);
+        setDestinationStatus(
+          error.code === error.PERMISSION_DENIED
+            ? "Location permission was denied. You can search for a destination instead."
+            : "We could not get your location. Please try again or search for a destination."
+        );
+      },
+      {
+        enableHighAccuracy: false,
+        timeout: 10000,
+        maximumAge: 300000,
+      }
+    );
+  }
+
+  async function searchRouteLocation(field) {
+    const query = field === "start"
+      ? routeStartQuery.trim()
+      : routeEndQuery.trim();
+
+    if (!query) {
+      setRouteStatus(`Enter a ${field === "start" ? "starting location" : "destination"} to search.`);
+      return;
+    }
+
+    setIsSearchingRoute(true);
+    setRouteStatus("");
+
+    try {
+      const response = await fetch(
+        `${apiBaseUrl}/geocode?place=${encodeURIComponent(query)}`
+      );
+
+      if (!response.ok) {
+        throw new Error("Route location search failed");
+      }
+
+      const data = await response.json();
+      const results = data.results || [];
+
+      if (field === "start") {
+        setRouteStartResults(results);
+      } else {
+        setRouteEndResults(results);
+      }
+
+      if (results.length === 0) {
+        setRouteStatus("No matching locations were found.");
+      }
+    } catch (error) {
+      console.error("Route location search failed:", error);
+      setRouteStatus("We could not search locations right now. Please try again.");
+    } finally {
+      setIsSearchingRoute(false);
+    }
+  }
+
+  async function selectRouteLocation(place, field) {
+    const location = {
+      name: getPlaceLabel(place),
+      latitude: Number(place.latitude),
+      longitude: Number(place.longitude),
+      weather: null,
+      isCurrentLocation: false,
+    };
+
+    if (field === "start") {
+      setRouteStartResults([]);
+      setRouteStart(location);
+    } else {
+      setRouteEndResults([]);
+      setRouteEnd(location);
+      setDestinationName(location.name);
+      setDestinationWeather(null);
+      setSelectedDestination(location);
+      setMapView({
+        center: [location.latitude, location.longitude],
+        zoom: isWithinHyderabad(location.latitude, location.longitude)
+          ? 13
+          : 11,
+      });
+    }
+
+    try {
+      const weather = await getCachedWeather(
+        location.latitude,
+        location.longitude
+      );
+      const locationWithWeather = { ...location, weather };
+
+      if (field === "start") {
+        setRouteStart(locationWithWeather);
+      } else {
+        setRouteEnd(locationWithWeather);
+        setDestinationWeather(weather);
+        setSelectedDestination(locationWithWeather);
+      }
+    } catch (error) {
+      console.error("Route weather request failed:", error);
+      setRouteStatus("Location selected, but its weather could not be loaded.");
+    }
+  }
+
+  function useMyLocationForRoute() {
+    if (!navigator.geolocation) {
+      setRouteStatus("Location services are not available in this browser.");
+      return;
+    }
+
+    setRouteStatus("Requesting your location permission...");
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const location = {
+          name: "Your current location",
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          weather: null,
+          isCurrentLocation: true,
+        };
+
+        setRouteStart(location);
+        setRouteStatus("");
+
+        try {
+          const weather = await getCachedWeather(
+            location.latitude,
+            location.longitude
+          );
+          setRouteStart({ ...location, weather });
+        } catch (error) {
+          console.error("Route start weather request failed:", error);
+          setRouteStatus("Your location was selected, but its weather could not be loaded.");
+        }
+      },
+      (error) => {
+        setRouteStatus(
+          error.code === error.PERMISSION_DENIED
+            ? "Location permission was denied. Search for a starting location instead."
+            : "We could not get your location. Please search for a starting location instead."
+        );
+      },
+      { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 }
+    );
+  }
+
+  function distanceInKilometres(latitudeA, longitudeA, latitudeB, longitudeB) {
+    const toRadians = (value) => value * Math.PI / 180;
+    const earthRadiusKm = 6371;
+    const latitudeDelta = toRadians(latitudeB - latitudeA);
+    const longitudeDelta = toRadians(longitudeB - longitudeA);
+    const calculation =
+      Math.sin(latitudeDelta / 2) ** 2 +
+      Math.cos(toRadians(latitudeA)) *
+      Math.cos(toRadians(latitudeB)) *
+      Math.sin(longitudeDelta / 2) ** 2;
+
+    return earthRadiusKm * 2 * Math.atan2(
+      Math.sqrt(calculation),
+      Math.sqrt(1 - calculation)
+    );
+  }
+
+  function analyseRouteReports(route) {
+    const nearbyReports = reports.filter((report) =>
+      route.geometry.coordinates.some(([longitude, latitude]) =>
+        distanceInKilometres(
+          report.position[0],
+          report.position[1],
+          latitude,
+          longitude
+        ) <= 0.3
+      )
+    );
+
+    const severityCounts = nearbyReports.reduce(
+      (counts, report) => ({
+        ...counts,
+        [report.severity]: counts[report.severity] + 1,
+      }),
+      { HIGH: 0, MEDIUM: 0, LOW: 0 }
+    );
+
+    const blockedReports = nearbyReports.filter(
+      (report) => report.severity === "HIGH"
+    );
+
+    return {
+      reports: nearbyReports,
+      blockedReports,
+      blockedPrototype: blockedReports.length > 0,
+      severityCounts,
+      evidenceScore:
+        severityCounts.HIGH * 100 +
+        severityCounts.MEDIUM * 15 +
+        severityCounts.LOW * 3,
+    };
+  }
+
+  function formatDistance(distanceMetres) {
+    return distanceMetres >= 1000
+      ? `${(distanceMetres / 1000).toFixed(1)} km`
+      : `${Math.round(distanceMetres)} m`;
+  }
+
+  function formatDuration(durationSeconds) {
+    const minutes = Math.round(durationSeconds / 60);
+    return minutes >= 60
+      ? `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+      : `${minutes} min`;
+  }
+
+  async function findSafeRoute() {
+    if (!routeStart || !routeEnd) {
+      setRouteStatus("Select both a starting location and destination first.");
+      return;
+    }
+
+    setIsLoadingRoute(true);
+    setRouteStatus("");
+    setRouteRoutes([]);
+    setSelectedRouteId(null);
+    setRecommendedRouteId(null);
+
+    const routeIsInHyderabad =
+      isWithinHyderabad(routeStart.latitude, routeStart.longitude) &&
+      isWithinHyderabad(routeEnd.latitude, routeEnd.longitude);
+
+    try {
+      const response = await fetch(
+        `${apiBaseUrl}/route?start_lat=${encodeURIComponent(routeStart.latitude)}&start_lon=${encodeURIComponent(routeStart.longitude)}&end_lat=${encodeURIComponent(routeEnd.latitude)}&end_lon=${encodeURIComponent(routeEnd.longitude)}`
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "Route request failed");
+      }
+
+      const analysedRoutes = data.routes.map((route) => ({
+        ...route,
+        analysis: routeIsInHyderabad
+          ? analyseRouteReports(route)
+          : null,
+      }));
+
+      const primaryRoute = analysedRoutes[0];
+      const saferAlternative = routeIsInHyderabad && primaryRoute?.analysis
+        ? analysedRoutes.slice(1).filter((route) =>
+            route.analysis && !route.analysis.blockedPrototype &&
+            route.analysis.evidenceScore < primaryRoute.analysis.evidenceScore
+          ).sort((first, second) =>
+            first.analysis.evidenceScore - second.analysis.evidenceScore ||
+            first.duration_s - second.duration_s
+          )[0]
+        : null;
+
+      const recommendedRoute =
+        routeIsInHyderabad && primaryRoute?.analysis?.blockedPrototype && saferAlternative
+          ? saferAlternative
+          : primaryRoute;
+
+      const primaryDistanceDelta = recommendedRoute && primaryRoute
+        ? recommendedRoute.distance_m - primaryRoute.distance_m
+        : 0;
+      const primaryTimeDelta = recommendedRoute && primaryRoute
+        ? recommendedRoute.duration_s - primaryRoute.duration_s
+        : 0;
+
+      setRouteRoutes(analysedRoutes);
+      setSelectedRouteId(recommendedRoute.id);
+      setRecommendedRouteId(recommendedRoute.id);
+
+      if (routeIsInHyderabad && primaryRoute?.analysis?.blockedPrototype && saferAlternative) {
+        setRouteStatus(
+          `Recommended diversion: ${Math.abs(primaryDistanceDelta) >= 1000 ? `${(Math.abs(primaryDistanceDelta) / 1000).toFixed(1)} km` : `${Math.round(Math.abs(primaryDistanceDelta))} m`} ${primaryDistanceDelta >= 0 ? "longer" : "shorter"} and ${Math.abs(primaryTimeDelta) >= 60 ? `${Math.round(Math.abs(primaryTimeDelta) / 60)} min` : `${Math.round(Math.abs(primaryTimeDelta))} sec`} ${primaryTimeDelta >= 0 ? "longer" : "shorter"}. Avoiding reported blocked road.`
+        );
+        return;
+      }
+
+      setRouteStatus(
+        routeIsInHyderabad
+          ? "Route found. Waterlogging warnings are based on nearby citizen reports, not confirmed road closures."
+          : "Route available. Waterlogging analysis is currently available for Hyderabad only."
+      );
+    } catch (error) {
+      console.error("Route request failed:", error);
+      setRouteStatus(
+        error.message || "We could not find a route right now. Please try again."
+      );
+    } finally {
+      setIsLoadingRoute(false);
+    }
+  }
+
+  function clearRoute() {
+    setRouteRoutes([]);
+    setSelectedRouteId(null);
+    setRecommendedRouteId(null);
+    setRouteStatus("Route cleared.");
+  }
+
+  function resetToHyderabad() {
+    setSelectedDestination(null);
+    setDestinationWeather(null);
+    setDestinationName("");
+    setDestinationResults([]);
+    setDestinationStatus("Showing the default Hyderabad map and weather.");
+    setMapView({ center: hyderabad, zoom: 12 });
+  }
+
+  function getWeatherStatus(weather) {
+    if (weather.next_6_hours_rain >= 5 || weather.rain_probability >= 60) {
+      return "Rain may increase waterlogging risk. Road risk remains an estimate.";
+    }
+
+    return "No substantial rainfall is forecast in the next 6 hours.";
+  }
+
+
+  // ------------------------------------
+  // REAL HYDERABAD ROAD DATA
+  // ------------------------------------
+
+const [roadData, setRoadData] = useState(null);
+
+useEffect(() => {
+  fetch("/src/data/hyderabad-roads.geojson")
+    .then((response) => {
+      if (!response.ok) {
+        throw new Error("Could not load Hyderabad roads");
+      }
+
+      return response.json();
+    })
+    .then((data) => {
+      setRoadData(data);
+
+      console.log(
+        "Hyderabad roads loaded:",
+        data.features.length
+      );
+    })
+    .catch((error) => {
+      console.error("Road data error:", error);
+    });
+}, []);
+
+
+  // ------------------------------------
+  // REPORTS
+  // ------------------------------------
+
+  const [reports, setReports] = useState([]);
+
+  const loadReports = useCallback(async () => {
+    try {
+      const response = await fetch(`${apiBaseUrl}/reports`);
+      if (!response.ok) {
+        throw new Error("Could not load reports");
+      }
+
+      const data = await response.json();
+      const reportList = Array.isArray(data?.reports) ? data.reports : Array.isArray(data) ? data : [];
+
+      setReports(
+        reportList.map((report) => ({
+          ...report,
+          id: report.id,
+          type: report.issue_type || report.type || "Waterlogged Road",
+          issue_type: report.issue_type || report.type || "Waterlogged Road",
+          location: report.location || "Reported location",
+          latitude: Number(report.latitude),
+          longitude: Number(report.longitude),
+          severity: String(report.severity || "MEDIUM").toUpperCase(),
+          status: report.status || "Reported",
+          position: [
+            Number(report.latitude),
+            Number(report.longitude),
+          ],
+        }))
+      );
+    } catch (error) {
+      console.error("Report loading failed:", error);
+      setReports([]);
+    }
+  }, [apiBaseUrl]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchReports = async () => {
+      try {
+        const response = await fetch(`${apiBaseUrl}/reports`);
+        if (!response.ok) {
+          throw new Error("Could not load reports");
+        }
+
+        const data = await response.json();
+        const reportList = Array.isArray(data?.reports)
+          ? data.reports
+          : Array.isArray(data)
+          ? data
+          : [];
+
+        if (!isMounted) {
+          return;
+        }
+
+        setReports(
+          reportList.map((report) => ({
+            ...report,
+            id: report.id,
+            type: report.issue_type || report.type || "Waterlogged Road",
+            issue_type: report.issue_type || report.type || "Waterlogged Road",
+            location: report.location || "Reported location",
+            latitude: Number(report.latitude),
+            longitude: Number(report.longitude),
+            severity: String(report.severity || "MEDIUM").toUpperCase(),
+            status: report.status || "Reported",
+            position: [
+              Number(report.latitude),
+              Number(report.longitude),
+            ],
+          }))
+        );
+      } catch (error) {
+        if (!isMounted) {
+          return;
+        }
+
+        console.error("Report loading failed:", error);
+        setReports([]);
+      }
+    };
+
+    void fetchReports();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [apiBaseUrl, loadReports]);
+
+
+  // ------------------------------------
+  // REPORT FORM
+  // ------------------------------------
+
+  const [showForm, setShowForm] = useState(false);
+
+  const [selectedLocation, setSelectedLocation] =
+    useState(null);
+
+  const [type, setType] =
+    useState("Waterlogged Road");
+
+  const [severity, setSeverity] =
+    useState("MEDIUM");
+
+  const [location, setLocation] =
+    useState("");
+
+  const [description, setDescription] =
+    useState("");
+
+  const [photo, setPhoto] =
+    useState(null);
+
+  const [reportFeedback, setReportFeedback] =
+    useState("");
+
+
+  // ------------------------------------
+  // SUBMIT REPORT
+  // ------------------------------------
+
+  async function submitReport(event) {
+    event.preventDefault();
+
+    if (!location.trim()) {
+      setReportFeedback("Please enter the location name.");
+      return;
+    }
+
+    if (!selectedLocation) {
+      setReportFeedback("Please select the exact location on the map.");
+      return;
+    }
+
+    const latitude = Number(selectedLocation[0]);
+    const longitude = Number(selectedLocation[1]);
+
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude) ||
+      latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+      setReportFeedback("Please provide valid latitude and longitude coordinates.");
+      return;
+    }
+
+    try {
+      setReportFeedback("Submitting report...");
+
+      const response = await fetch(
+        `${apiBaseUrl}/reports`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            type,
+            issue_type: type,
+            location,
+            latitude,
+            longitude,
+            severity,
+            description,
+            status: "Reported",
+          }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "Failed to submit report");
+      }
+
+      await loadReports();
+
+      setLocation("");
+      setDescription("");
+      setPhoto(null);
+      setType("Waterlogged Road");
+      setSeverity("MEDIUM");
+      setSelectedLocation(null);
+      setShowForm(false);
+      setReportFeedback("Report submitted successfully.");
+    } catch (error) {
+      console.error(error);
+      setReportFeedback(error.message || "Could not submit the report.");
+    }
+  }
+
+
+  // ------------------------------------
+  // RAIN IMPACT
+  // ------------------------------------
+
+  function getRainFactor() {
+
+    const riskRainfall =
+      selectedDestination &&
+      selectedDestination.weather &&
+      isWithinHyderabad(
+        selectedDestination.latitude,
+        selectedDestination.longitude
+      )
+        ? selectedDestination.weather.next_6_hours_rain
+        : rainfall;
+
+    if (riskRainfall >= 30) {
+      return 20;
+    }
+
+    if (riskRainfall >= 15) {
+      return 12;
+    }
+
+    if (riskRainfall >= 5) {
+      return 6;
+    }
+
+    return 0;
+
+  }
+
+
+  // ------------------------------------
+  // REPORT IMPACT
+  // ------------------------------------
+
+  function getSeverityPoints(
+    severity
+  ) {
+
+    if (severity === "HIGH") {
+      return 20;
+    }
+
+    if (severity === "MEDIUM") {
+      return 12;
+    }
+
+    return 5;
+
+  }
+
+
+  // ------------------------------------
+  // ROAD RISK
+  // ------------------------------------
+
+  function getRoadRisk(
+    feature
+  ) {
+
+    const roadType =
+      feature?.properties?.highway ||
+      "tertiary";
+
+
+    let risk = 35;
+
+
+    if (roadType === "trunk") {
+      risk = 48;
+    }
+
+    else if (roadType === "primary") {
+      risk = 44;
+    }
+
+    else if (roadType === "secondary") {
+      risk = 40;
+    }
+
+    else if (roadType === "tertiary") {
+      risk = 35;
+    }
+
+
+    // Rainfall contribution
+    risk += getRainFactor();
+
+
+    // Road coordinates
+    const coordinates =
+      feature.geometry?.coordinates || [];
+
+
+    // Check reports near this road
+    reports.forEach((report) => {
+
+      const reportLat =
+        report.position[0];
+
+      const reportLng =
+        report.position[1];
+
+
+      const nearby =
+        coordinates.some(
+          (point) => {
+
+            const roadLng =
+              point[0];
+
+            const roadLat =
+              point[1];
+
+
+            const distance =
+              Math.sqrt(
+
+                (reportLat - roadLat) ** 2 +
+
+                (reportLng - roadLng) ** 2
+
+              );
+
+
+            return distance < 0.004;
+
+          }
+        );
+
+
+      if (nearby) {
+
+        risk += getSeverityPoints(
+          report.severity
+        );
+
+      }
+
+    });
+
+
+    return Math.min(
+      100,
+      Math.round(risk)
+    );
+
+  }
+
+
+  // ------------------------------------
+  // RISK LABEL
+  // ------------------------------------
+
+  function getRiskLabel(
+    risk
+  ) {
+
+    if (risk >= 80) {
+      return "HIGH";
+    }
+
+    if (risk >= 50) {
+      return "MODERATE";
+    }
+
+    return "LOW";
+
+  }
+
+
+  // ------------------------------------
+  // VEHICLE STATUS
+  // ------------------------------------
+
+  function getVehicleStatus(
+    risk
+  ) {
+
+    if (risk >= 80) {
+      return "Avoid if possible";
+    }
+
+    if (risk >= 60) {
+      return "Difficult for vehicles";
+    }
+
+    if (risk >= 40) {
+      return "Passable with caution";
+    }
+
+    return "PASSABLE";
+
+  }
+
+
+  // ------------------------------------
+  // WATER ESTIMATE
+  // ------------------------------------
+
+  function getWaterPercentage(
+    risk
+  ) {
+
+    return Math.min(
+      95,
+      Math.max(
+        5,
+        Math.round(risk * 0.85)
+      )
+    );
+
+  }
+
+
+  // ------------------------------------
+  // ROAD STYLE
+  // ------------------------------------
+
+  function roadStyle() {
+    return {
+      color: "#94a3b8",
+      weight: 2,
+      opacity: 0.55,
+
+    };
+
+  }
+
+
+  // ------------------------------------
+  // ROAD POPUP
+  // ------------------------------------
+
+  function onEachRoad(
+    feature,
+    layer
+  ) {
+
+    const risk =
+      getRoadRisk(feature);
+
+
+    const roadName =
+      feature?.properties?.name ||
+      "Unnamed road";
+
+
+    const waterPercentage =
+      getWaterPercentage(
+        risk
+      );
+
+
+    const vehicleStatus =
+      getVehicleStatus(
+        risk
+      );
+
+
+    layer.bindPopup(`
+
+      <div style="min-width:210px">
+
+        <strong style="font-size:15px">
+          ${roadName}
+        </strong>
+
+        <br />
+
+        <span>
+          Water accumulation:
+          <strong>
+            ${waterPercentage}%
+          </strong>
+        </span>
+
+        <br />
+
+        <span>
+          Risk:
+          <strong>
+            ${getRiskLabel(risk)}
+          </strong>
+        </span>
+
+        <br />
+
+        <span>
+          Risk score:
+          ${risk}/100
+        </span>
+
+        <br />
+
+        <span>
+          Vehicle access:
+          <strong>
+            ${vehicleStatus}
+          </strong>
+        </span>
+
+        <br />
+
+        <span>
+          Rain forecast:
+          ${selectedDestination && selectedDestination.weather && isWithinHyderabad(selectedDestination.latitude, selectedDestination.longitude) ? selectedDestination.weather.next_6_hours_rain : rainfall} mm
+        </span>
+
+        <br /><br />
+
+        <small>
+          Prototype risk estimate based on
+          rainfall and nearby reports.
+        </small>
+
+      </div>
+
+    `);
+
+  }
+
+
+  // ------------------------------------
+  // COUNT HIGH RISK ROADS
+  // ------------------------------------
+
+  const highRiskRoadCount =
+    roadData
+      ? roadData.features.filter(
+          (feature) =>
+            getRoadRisk(feature) >= 80
+        ).length
+      : 0;
+
+  const prototypeRoadSegments = useMemo(() => {
+    if (!roadData) {
+      return [];
+    }
+
+    const sampleConditions = [
+      {
+        reportId: 1,
+        status: "BLOCKED",
+        color: "#dc2626",
+        recommendation: "Avoid if possible",
+      },
+      {
+        reportId: 2,
+        status: "PASSABLE WITH CAUTION",
+        color: "#f59e0b",
+        recommendation: "Proceed carefully",
+      },
+      {
+        reportId: 4,
+        status: "PASSABLE",
+        color: "#16a34a",
+        recommendation: "Recommended among the sample conditions",
+      },
+    ];
+
+    return sampleConditions.map((condition) => {
+      const report = reports.find(
+        (item) => item.id === condition.reportId
+      );
+
+      if (!report) {
+        return null;
+      }
+
+      const nearestFeature = roadData.features.reduce(
+        (closest, feature) => {
+          const featureDistance = Math.min(
+            ...feature.geometry.coordinates.map(([longitude, latitude]) =>
+              (latitude - report.position[0]) ** 2 +
+              (longitude - report.position[1]) ** 2
+            )
+          );
+
+          return !closest || featureDistance < closest.distance
+            ? { feature, distance: featureDistance }
+            : closest;
+        },
+        null
+      );
+
+      return nearestFeature
+        ? { ...condition, report, feature: nearestFeature.feature }
+        : null;
+    }).filter(Boolean);
+  }, [reports, roadData]);
+
+  const selectedRoute = routeRoutes.find(
+    (route) => route.id === selectedRouteId
+  );
+
+  const showingHyderabadRoads =
+    !selectedDestination ||
+    isWithinHyderabad(
+      selectedDestination.latitude,
+      selectedDestination.longitude
+    );
+
+  const mapTitle = showingHyderabadRoads
+    ? "Hyderabad Risk Map"
+    : "Destination Weather Map";
+
+
+  // ------------------------------------
+  // UI
+  // ------------------------------------
+
+  return (
+
+    <div className="app">
+
+
+      {/* HEADER */}
+
+      <header className="topbar">
+
+        <div>
+
+          <h1>
+            LAKEWATCH AI
+          </h1>
+
+          <p>
+            Hyderabad Waterlogging &
+            Drainage Monitor
+          </p>
+
+        </div>
+
+
+        <button
+          className="admin-btn"
+          onClick={() =>
+            alert(
+              "GHMC Dashboard coming next"
+            )
+          }
+        >
+          GHMC Dashboard
+        </button>
+
+      </header>
+
+
+      <main>
+
+
+        {/* HERO */}
+
+        <section className="hero">
+
+          <div>
+
+            <h2>
+              Monitor. Detect. Act.
+            </h2>
+
+
+            <p>
+              Helping Hyderabad identify
+              drainage and waterlogging risks
+              before they become bigger problems.
+            </p>
+
+
+            <div className="hero-actions">
+
+              <button
+                className="primary-btn"
+                onClick={() =>
+                  setShowForm(true)
+                }
+              >
+                Report a Problem
+              </button>
+
+
+              <button
+                className="secondary-btn"
+                onClick={() =>
+                  document
+                    .getElementById("risk-map")
+                    ?.scrollIntoView({
+                      behavior: "smooth",
+                    })
+                }
+              >
+                View Risk Map
+              </button>
+
+            </div>
+
+          </div>
+
+
+          <div className="risk-card">
+
+            <span>
+              Hyderabad Risk
+            </span>
+
+
+            <strong>
+
+              {rainfall >= 30
+                ? "HIGH"
+                : rainfall >= 10
+                ? "MEDIUM"
+                : "LOW"}
+
+            </strong>
+
+
+            <small>
+
+              Based on rainfall
+              and reported hazards
+
+            </small>
+
+          </div>
+
+        </section>
+
+
+        {/* DESTINATION WEATHER */}
+
+        <section className="destination-weather-section">
+
+          <div className="section-heading">
+
+            <div>
+
+              <h2>
+                Destination Weather
+              </h2>
+
+              <p>
+                Search a destination or choose your current location.
+              </p>
+
+            </div>
+
+          </div>
+
+
+          <form
+            className="destination-search"
+            onSubmit={searchDestination}
+          >
+
+            <label htmlFor="destination-input">
+              Destination
+            </label>
+
+            <input
+              id="destination-input"
+              type="text"
+              placeholder="Example: Gachibowli, Bengaluru, Chennai"
+              value={destinationQuery}
+              onChange={(event) =>
+                setDestinationQuery(event.target.value)
+              }
+            />
+
+            <button
+              type="submit"
+              className="primary-btn"
+              disabled={isSearchingDestination}
+            >
+              {isSearchingDestination
+                ? "Searching…"
+                : "Search Destination"}
+            </button>
+
+            <button
+              type="button"
+              className="secondary-btn"
+              onClick={useMyLocation}
+              disabled={isLoadingDestinationWeather}
+            >
+              Use My Location
+            </button>
+
+          </form>
+
+
+          {destinationStatus && (
+
+            <p className="destination-status" role="status">
+              {destinationStatus}
+            </p>
+
+          )}
+
+
+          {destinationResults.length > 0 && (
+
+            <div className="destination-results">
+
+              <strong>
+                Select a matching location
+              </strong>
+
+              {destinationResults.map((place) => (
+
+                <button
+                  type="button"
+                  className="destination-result"
+                  key={`${place.latitude}-${place.longitude}`}
+                  onClick={() => selectDestination(place)}
+                >
+                  {getPlaceLabel(place)}
+                </button>
+
+              ))}
+
+            </div>
+
+          )}
+
+
+          {isLoadingDestinationWeather && (
+
+            <p className="destination-status" role="status">
+              Loading destination weather…
+            </p>
+
+          )}
+
+
+          {destinationWeather && (
+
+            <div className="destination-weather-card">
+
+              <div>
+
+                <span>
+                  Weather for
+                </span>
+
+                <h3>
+                  {destinationName}
+                </h3>
+
+              </div>
+
+              <div className="destination-weather-details">
+
+                <div>
+                  <span>Temperature</span>
+                  <strong>{destinationWeather.temperature}°C</strong>
+                </div>
+
+                <div>
+                  <span>Next 6h rain</span>
+                  <strong>
+                    {destinationWeather.next_6_hours_rain} mm
+                  </strong>
+                </div>
+
+                <div>
+                  <span>Rain probability</span>
+                  <strong>{destinationWeather.rain_probability}%</strong>
+                </div>
+
+                <div>
+                  <span>Timezone</span>
+                  <strong>{destinationWeather.timezone}</strong>
+                </div>
+
+              </div>
+
+              <p className="weather-implication">
+                <strong>Risk implication:</strong>
+                {" "}
+                {getWeatherStatus(destinationWeather)}
+              </p>
+
+            </div>
+
+          )}
+
+        </section>
+
+
+        {/* ROUTE PLANNING */}
+
+        <section className="route-planning-section">
+
+          <div className="section-heading">
+
+            <div>
+
+              <h2>
+                Waterlogging-Aware Route Planning
+              </h2>
+
+              <p>
+                Route recommendations use driving directions and nearby citizen reports where Hyderabad data is available.
+              </p>
+
+            </div>
+
+          </div>
+
+
+          <div className="route-search-grid">
+
+            <div className="route-location-field">
+
+              <label htmlFor="route-start-input">
+                From
+              </label>
+
+              <div className="route-input-actions">
+
+                <input
+                  id="route-start-input"
+                  type="text"
+                  placeholder="Search starting location"
+                  value={routeStartQuery}
+                  onChange={(event) =>
+                    setRouteStartQuery(event.target.value)
+                  }
+                />
+
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={() => searchRouteLocation("start")}
+                  disabled={isSearchingRoute}
+                >
+                  Search
+                </button>
+
+              </div>
+
+              <button
+                type="button"
+                className="route-location-button"
+                onClick={useMyLocationForRoute}
+              >
+                Use My Location
+              </button>
+
+              {routeStart && (
+
+                <p className="route-selection">
+                  Start: {routeStart.name}
+                </p>
+
+              )}
+
+              {routeStartResults.map((place) => (
+
+                <button
+                  type="button"
+                  className="destination-result"
+                  key={`route-start-${place.latitude}-${place.longitude}`}
+                  onClick={() => selectRouteLocation(place, "start")}
+                >
+                  {getPlaceLabel(place)}
+                </button>
+
+              ))}
+
+            </div>
+
+
+            <div className="route-location-field">
+
+              <label htmlFor="route-end-input">
+                To
+              </label>
+
+              <div className="route-input-actions">
+
+                <input
+                  id="route-end-input"
+                  type="text"
+                  placeholder="Search destination"
+                  value={routeEndQuery}
+                  onChange={(event) =>
+                    setRouteEndQuery(event.target.value)
+                  }
+                />
+
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={() => searchRouteLocation("end")}
+                  disabled={isSearchingRoute}
+                >
+                  Search
+                </button>
+
+              </div>
+
+              {routeEnd && (
+
+                <p className="route-selection">
+                  Destination: {routeEnd.name}
+                </p>
+
+              )}
+
+              {routeEndResults.map((place) => (
+
+                <button
+                  type="button"
+                  className="destination-result"
+                  key={`route-end-${place.latitude}-${place.longitude}`}
+                  onClick={() => selectRouteLocation(place, "end")}
+                >
+                  {getPlaceLabel(place)}
+                </button>
+
+              ))}
+
+            </div>
+
+          </div>
+
+
+          <div className="route-actions">
+
+            <button
+              type="button"
+              className="primary-btn"
+              onClick={findSafeRoute}
+              disabled={isLoadingRoute}
+            >
+              {isLoadingRoute ? "Finding route..." : "Find Safe Route"}
+            </button>
+
+            {routeRoutes.length > 0 && (
+
+              <button
+                type="button"
+                className="secondary-btn"
+                onClick={clearRoute}
+              >
+                Clear Route
+              </button>
+
+            )}
+
+          </div>
+
+
+          {routeStatus && (
+
+            <p className="route-status" role="status">
+              {routeStatus}
+            </p>
+
+          )}
+
+
+          {routeStart?.weather && routeEnd?.weather && (
+
+            <div className="route-weather-summary">
+
+              <span>
+                Start weather: {routeStart.weather.temperature}°C, {routeStart.weather.rain_probability}% rain probability
+              </span>
+
+              <span>
+                Destination weather: {routeEnd.weather.temperature}°C, {routeEnd.weather.rain_probability}% rain probability
+              </span>
+
+            </div>
+
+          )}
+
+
+          {routeRoutes.length > 0 && (
+
+            <div className="route-results">
+
+              {routeRoutes.map((route, index) => {
+                const isSelected = route.id === selectedRouteId;
+                const isRecommended =
+                  route.id === recommendedRouteId && index > 0;
+
+                return (
+
+                  <button
+                    type="button"
+                    className={isSelected ? "route-option selected" : "route-option"}
+                    key={route.id}
+                    onClick={() => setSelectedRouteId(route.id)}
+                  >
+                    <strong>
+                      {index === 0 ? "Primary Route" : `Alternative Route ${index}`}
+                      {isRecommended ? " - Recommended diversion" : ""}
+                    </strong>
+
+                    <span>
+                      {formatDistance(route.distance_m)} - {formatDuration(route.duration_s)}
+                    </span>
+
+                    {route.analysis && route.analysis.reports.length > 0 && (
+
+                      <small>
+                        Reported waterlogging near route: {route.analysis.severityCounts.HIGH} high, {route.analysis.severityCounts.MEDIUM} medium, {route.analysis.severityCounts.LOW} low.
+                      </small>
+
+                    )}
+
+                  </button>
+
+                );
+              })}
+
+
+              {selectedRoute?.analysis?.severityCounts.HIGH > 0 && (
+
+                <p className="route-warning">
+                  Reported high-risk waterlogging is near this route. This is citizen-report evidence, not confirmation that a road is blocked.
+                </p>
+
+              )}
+
+            </div>
+
+          )}
+
+        </section>
+
+
+        {/* REPORT FORM */}
+
+        {showForm && (
+
+          <section
+            className="report-form-section"
+          >
+
+            <div className="section-heading">
+
+              <div>
+
+                <h2>
+                  Report a Problem
+                </h2>
+
+                <p>
+                  Report a waterlogging or
+                  drainage issue in Hyderabad.
+                </p>
+
+              </div>
+
+
+              <button
+                className="secondary-btn"
+                onClick={() =>
+                  setShowForm(false)
+                }
+              >
+                Close
+              </button>
+
+            </div>
+
+
+            <form
+              className="report-form"
+              onSubmit={submitReport}
+            >
+
+
+              <label>
+
+                Problem Type
+
+                <select
+                  value={type}
+                  onChange={(e) =>
+                    setType(e.target.value)
+                  }
+                >
+
+                  <option>
+                    Waterlogged Road
+                  </option>
+
+                  <option>
+                    Blocked Drain
+                  </option>
+
+                  <option>
+                    Open Drain Cover
+                  </option>
+
+                  <option>
+                    Garbage Dumping
+                  </option>
+
+                </select>
+
+              </label>
+
+              <label>
+                Severity
+                <select
+                  value={severity}
+                  onChange={(e) => setSeverity(e.target.value)}
+                >
+                  <option value="HIGH">HIGH</option>
+                  <option value="MEDIUM">MEDIUM</option>
+                  <option value="LOW">LOW</option>
+                </select>
+              </label>
+
+
+              <label>
+
+                Location
+
+                <input
+                  type="text"
+                  placeholder="Example: Gachibowli"
+                  value={location}
+                  onChange={(e) =>
+                    setLocation(
+                      e.target.value
+                    )
+                  }
+                />
+
+
+                {selectedLocation && (
+
+                  <p className="selected-location">
+
+                    📍 Selected:
+
+                    {" "}
+
+                    {selectedLocation[0]
+                      .toFixed(5)}
+
+                    {", "}
+
+                    {selectedLocation[1]
+                      .toFixed(5)}
+
+                  </p>
+
+                )}
+
+              </label>
+
+              <button
+                type="button"
+                className="secondary-btn"
+                onClick={() => {
+                  if (!navigator.geolocation) {
+                    setReportFeedback("Location services are not available in this browser.");
+                    return;
+                  }
+
+                  setReportFeedback("Requesting your location permission...");
+
+                  navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                      const nextLocation = [
+                        position.coords.latitude,
+                        position.coords.longitude,
+                      ];
+
+                      setSelectedLocation(nextLocation);
+                      setLocation("My current location");
+                      setReportFeedback("Current location selected. Confirm and submit the report.");
+                    },
+                    (error) => {
+                      setReportFeedback(
+                        error.code === error.PERMISSION_DENIED
+                          ? "Location permission was denied. Select a point on the map instead."
+                          : "We could not access your location. Please pick a location on the map."
+                      );
+                    },
+                    { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 }
+                  );
+                }}
+              >
+                Use My Location
+              </button>
+
+
+              <label>
+
+                Upload Photo
+
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) =>
+                    setPhoto(
+                      e.target.files[0]
+                    )
+                  }
+                />
+
+
+                {photo && (
+
+                  <p className="selected-location">
+
+                    📷 {photo.name}
+
+                  </p>
+
+                )}
+
+
+                {photo && (
+
+                  <img
+                    src={URL.createObjectURL(photo)}
+                    alt="Selected report"
+                    className="report-preview"
+                  />
+
+                )}
+
+              </label>
+
+
+              <label>
+
+                Description
+
+                <textarea
+                  placeholder="Briefly describe the problem..."
+                  value={description}
+                  onChange={(e) =>
+                    setDescription(
+                      e.target.value
+                    )
+                  }
+                />
+
+              </label>
+
+
+              {reportFeedback && (
+                <p className="destination-status" role="status">
+                  {reportFeedback}
+                </p>
+              )}
+
+              <button
+                type="submit"
+                className="primary-btn"
+              >
+                Submit Report
+              </button>
+
+            </form>
+
+          </section>
+
+        )}
+
+
+        {/* STATS */}
+
+        <section className="stats">
+
+          <div className="stat-card">
+
+            <span>
+              Reported Issues
+            </span>
+
+            <strong>
+              {reports.length}
+            </strong>
+
+          </div>
+
+
+          <div className="stat-card">
+
+            <span>
+              High Risk Roads
+            </span>
+
+            <strong>
+              {highRiskRoadCount}
+            </strong>
+
+          </div>
+
+
+          <div className="stat-card">
+
+            <span>
+              Next 6h Rain
+            </span>
+
+            <strong>
+              {rainfall} mm
+            </strong>
+
+            <small>
+              {rainProbability}%
+              {" "}rain probability
+            </small>
+
+          </div>
+
+
+          <div className="stat-card">
+
+            <span>
+              Resolved
+            </span>
+
+            <strong>
+
+              {
+                reports.filter(
+                  (report) =>
+                    report.status ===
+                    "Resolved"
+                ).length
+              }
+
+            </strong>
+
+          </div>
+
+        </section>
+
+
+        {/* REAL HYDERABAD MAP */}
+
+        <section
+          className="map-section"
+          id="risk-map"
+        >
+
+          <div className="section-heading">
+
+            <div>
+
+              <h2>
+                {mapTitle}
+              </h2>
+
+              <p>
+                {showingHyderabadRoads
+                  ? "Road colours show estimated waterlogging risk in Hyderabad"
+                  : "Destination weather marker; Hyderabad road risk is unavailable here"}
+              </p>
+
+            </div>
+
+            <div className="map-controls">
+
+              <span>Map:</span>
+
+              <button
+                type="button"
+                className={mapMode === "street" ? "map-mode active" : "map-mode"}
+                onClick={() => {
+                  setMapMode("street");
+                  setSatelliteStatus("");
+                }}
+              >
+                Street
+              </button>
+
+              <button
+                type="button"
+                className={mapMode === "satellite" ? "map-mode active" : "map-mode"}
+                onClick={() => {
+                  setMapMode("satellite");
+                  setSatelliteStatus("");
+                }}
+              >
+                Satellite
+              </button>
+
+              {selectedDestination && (
+                <button
+                  type="button"
+                  className="secondary-btn reset-map-btn"
+                  onClick={resetToHyderabad}
+                >
+                  Reset to Hyderabad
+                </button>
+              )}
+
+            </div>
+
+          </div>
+
+
+          <div className="map-container">
+
+            <MapContainer
+
+              center={hyderabad}
+
+              zoom={12}
+
+              minZoom={11}
+
+              maxZoom={18}
+
+              scrollWheelZoom={true}
+
+              className="leaflet-map"
+
+              maxBoundsViscosity={1.0}
+
+            >
+
+              <MapViewController
+                mapView={mapView}
+                keepHyderabadBounds={showingHyderabadRoads}
+                routeCoordinates={selectedRoute?.geometry?.coordinates}
+              />
+
+              {mapMode === "street" ? (
+
+                <TileLayer
+                  attribution="&copy; OpenStreetMap contributors"
+                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                />
+
+              ) : (
+
+                <TileLayer
+                  key="satellite-base"
+                  attribution="NASA GIBS - VIIRS NOAA-20 Corrected Reflectance (True Color)"
+                  url={NASA_GIBS_TILE_URL}
+                  maxNativeZoom={9}
+                  maxZoom={18}
+                  noWrap={false}
+                  crossOrigin={true}
+                  eventHandlers={{
+                    tileerror: (event) => {
+                      console.error("NASA GIBS tile failed to load", event);
+                      setSatelliteStatus(
+                        "Satellite imagery is temporarily unavailable. Street mode remains available."
+                      );
+                    },
+                    tileload: () => setSatelliteStatus("")
+                  }}
+                />
+
+              )}
+
+
+              <LocationPicker
+                onSelect={
+                  setSelectedLocation
+                }
+              />
+
+
+              {/* REAL ROAD NETWORK */}
+
+              {showingHyderabadRoads && roadData && (
+
+                <GeoJSON
+
+                  key={`${rainfall}-${reports.length}`}
+
+                  data={roadData}
+
+                  style={roadStyle}
+
+                  onEachFeature={onEachRoad}
+
+                />
+
+              )}
+
+
+              {/* Prototype status overlays on selected real Hyderabad roads */}
+
+              {showingHyderabadRoads && prototypeRoadSegments.map((segment) => (
+
+                <GeoJSON
+                  key={`prototype-road-${segment.reportId}`}
+                  data={segment.feature}
+                  style={{
+                    color: segment.color,
+                    weight: 8,
+                    opacity: 0.95,
+                  }}
+                  onEachFeature={(feature, layer) => {
+                    layer.bindPopup(`
+                      <div style="min-width:210px">
+                        <strong>${feature.properties?.name || "Sample road segment"}</strong>
+                        <br />
+                        <span>Road status: <strong>${segment.status}</strong></span>
+                        <br />
+                        <span>Evidence: ${segment.report.severity} citizen report near ${segment.report.location}</span>
+                        <br />
+                        <span>${segment.recommendation}</span>
+                        <br /><br />
+                        <small>Reported blocked / prototype road status. This is not a confirmed closure.</small>
+                      </div>
+                    `);
+                  }}
+                />
+
+              ))}
+
+
+              {/* SELECTED LOCATION */}
+
+              {selectedLocation && (
+
+                <Marker
+                  position={
+                    selectedLocation
+                  }
+                >
+
+                  <Popup>
+                    📍 Selected report location
+                  </Popup>
+
+                </Marker>
+
+              )}
+
+
+              {/* REPORT MARKERS */}
+
+              {showingHyderabadRoads && reports.map(
+                (report) => (
+
+                  <Marker
+                    key={report.id}
+                    position={
+                      report.position
+                    }
+                    icon={createReportIcon(report.severity)}
+                  >
+
+                    <Popup>
+
+                      <strong>Reported waterlogging</strong>
+
+                      <br />
+
+                      Location:
+                      {" "}
+                      {report.location}
+
+                      <br />
+
+                      Severity:
+                      {" "}
+                      {report.severity}
+
+                      <br />
+
+                      Road status:
+                      {" "}
+                      {getReportRoadStatus(report.severity)}
+
+                      <br />
+
+                      {" "}
+                      {report.status}
+                      Existing report status:
+                      {" "}
+                      {report.status}
+
+                      <br />
+
+                      Reported issue:
+                      {" "}
+                      {report.type}
+                      {" "}
+                      {report.status}
+
+                    </Popup>
+
+                  </Marker>
+
+                )
+              )}
+
+
+              {selectedDestination && (
+
+                <Marker
+                  position={[
+                    selectedDestination.latitude,
+                    selectedDestination.longitude,
+                  ]}
+                >
+
+                  <Popup>
+
+                    <strong>
+                      {selectedDestination.isCurrentLocation
+                        ? "Current location"
+                        : selectedDestination.name}
+                    </strong>
+
+                    <br />
+
+                    Temperature: {selectedDestination.weather
+                      ? `${selectedDestination.weather.temperature}°C`
+                      : "Unavailable"}
+
+                    <br />
+
+                    Rain probability: {selectedDestination.weather
+                      ? `${selectedDestination.weather.rain_probability}%`
+                      : "Unavailable"}
+
+                    <br />
+
+                    Next 6h rain: {selectedDestination.weather
+                      ? `${selectedDestination.weather.next_6_hours_rain} mm`
+                      : "Unavailable"}
+
+                  </Popup>
+
+                </Marker>
+
+              )}
+
+
+              {routeStart && (
+
+                <Marker position={[routeStart.latitude, routeStart.longitude]}>
+
+                  <Popup>
+                    <strong>Route start</strong>
+                    <br />
+                    {routeStart.name}
+                  </Popup>
+
+                </Marker>
+
+              )}
+
+
+              {routeEnd && (
+
+                <Marker position={[routeEnd.latitude, routeEnd.longitude]}>
+
+                  <Popup>
+                    <strong>Route destination</strong>
+                    <br />
+                    {routeEnd.name}
+                  </Popup>
+
+                </Marker>
+
+              )}
+
+
+              {routeRoutes.map((route, index) => (
+
+                <Polyline
+                  key={route.id}
+                  positions={route.geometry.coordinates.map(
+                    ([longitude, latitude]) => [latitude, longitude]
+                  )}
+                  pathOptions={{
+                    color: route.id === selectedRouteId
+                      ? "#2563eb"
+                      : index === 0
+                      ? "#f59e0b"
+                      : "#64748b",
+                    weight: route.id === selectedRouteId ? 6 : 4,
+                    opacity: route.id === selectedRouteId ? 0.95 : 0.7,
+                    dashArray: route.id === selectedRouteId
+                      ? undefined
+                      : "8 8",
+                  }}
+                  eventHandlers={{
+                    click: () => setSelectedRouteId(route.id),
+                  }}
+                />
+
+              ))}
+
+
+              {selectedRoute?.analysis?.reports.map((report) => (
+
+                <Marker
+                  key={`route-warning-${report.id}`}
+                  position={report.position}
+                  icon={createReportIcon(report.severity)}
+                >
+
+                  <Popup>
+                    <strong>Reported waterlogging near route</strong>
+                    <br />
+                    {report.location} - {report.severity}
+                    <br />
+                    Citizen report; not a confirmed road closure.
+                  </Popup>
+
+                </Marker>
+
+              ))}
+
+            </MapContainer>
+
+
+            {/* LEGEND */}
+
+            {showingHyderabadRoads && (
+
+            <div className="map-legend">
+
+              <strong>
+                Waterlogging Risk
+              </strong>
+
+
+              <div className="legend-item">
+
+                <span
+                  className="legend-color low"
+                />
+
+                Low — Passable
+
+              </div>
+
+
+              <div className="legend-item">
+
+                <span
+                  className="legend-color medium"
+                />
+
+                Moderate — Caution
+
+              </div>
+
+
+              <div className="legend-item">
+
+                <span
+                  className="legend-color high"
+                />
+
+                High — Difficult
+
+              </div>
+
+            </div>
+
+            )}
+
+          </div>
+
+          {satelliteStatus && (
+
+            <p className="satellite-status" role="status">
+              {satelliteStatus}
+            </p>
+
+          )}
+
+          {mapMode === "satellite" && (
+
+            <p className="satellite-note">
+              NASA true-color imagery is a visual reference only. It does not
+              calculate waterlogging or NDWI.
+            </p>
+
+          )}
+
+        </section>
+
+
+        {/* RECENT REPORTS */}
+
+        <section className="reports-section">
+
+          <div className="section-heading">
+
+            <div>
+
+              <h2>
+                Recent Reports
+              </h2>
+
+              <p>
+                Latest citizen-reported
+                problems
+              </p>
+
+            </div>
+
+          </div>
+
+
+          <div className="report-list">
+
+            {reports
+              .slice(0, 5)
+              .map((report) => (
+
+                <div
+                  className="report"
+                  key={report.id}
+                >
+
+                  <div>
+
+                    <h3>
+                      {report.type}
+                    </h3>
+
+                    <p>
+                      {report.location}
+                      {" • "}
+                      Recently reported
+                    </p>
+
+                  </div>
+
+
+                  <span
+                    className={`badge ${
+                      report.severity ===
+                      "HIGH"
+                        ? "high-badge"
+                        : report.severity ===
+                          "MEDIUM"
+                        ? "medium-badge"
+                        : "low-badge"
+                    }`}
+                  >
+                    {report.severity}
+                  </span>
+
+                </div>
+
+              ))}
+
+          </div>
+
+        </section>
+
+      </main>
+
+    </div>
+
+  );
+}
+
+
+export default App;
