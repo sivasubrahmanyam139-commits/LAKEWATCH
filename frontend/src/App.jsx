@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { divIcon } from "leaflet";
+import hyderabadRoadsUrl from "./data/hyderabad-roads.geojson?url";
 
 
 import {
@@ -113,7 +114,8 @@ function LocationPicker({ onSelect }) {
 function App() {
 
   const hyderabad = HYDERABAD_CENTER;
-  const apiBaseUrl = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+  const rawApiUrl = (import.meta.env.VITE_API_URL || "http://127.0.0.1:8000").trim();
+  const apiBaseUrl = rawApiUrl.endsWith("/") ? rawApiUrl.slice(0, -1) : rawApiUrl;
 
 
   // ------------------------------------
@@ -672,21 +674,22 @@ function App() {
 const [roadData, setRoadData] = useState(null);
 
 useEffect(() => {
-  fetch("/src/data/hyderabad-roads.geojson")
+  fetch(hyderabadRoadsUrl)
+    .then((response) => {
+      if (!response.ok) {
+        return fetch("/hyderabad-roads.geojson");
+      }
+      return response;
+    })
     .then((response) => {
       if (!response.ok) {
         throw new Error("Could not load Hyderabad roads");
       }
-
       return response.json();
     })
     .then((data) => {
       setRoadData(data);
-
-      console.log(
-        "Hyderabad roads loaded:",
-        data.features.length
-      );
+      console.log("Hyderabad roads loaded:", data?.features?.length || 0);
     })
     .catch((error) => {
       console.error("Road data error:", error);
@@ -708,7 +711,11 @@ useEffect(() => {
       }
 
       const data = await response.json();
-      const reportList = Array.isArray(data?.reports) ? data.reports : Array.isArray(data) ? data : [];
+      const reportList = Array.isArray(data?.reports)
+        ? data.reports
+        : Array.isArray(data)
+        ? data
+        : [];
 
       setReports(
         reportList.map((report) => ({
@@ -729,64 +736,51 @@ useEffect(() => {
       );
     } catch (error) {
       console.error("Report loading failed:", error);
-      setReports([]);
     }
-  }, [apiBaseUrl]);
+  }, [apiBaseUrl, setReports]);
 
   useEffect(() => {
-    let isMounted = true;
-
-    const fetchReports = async () => {
+    let ignore = false;
+    async function fetchInitialReports() {
       try {
         const response = await fetch(`${apiBaseUrl}/reports`);
-        if (!response.ok) {
-          throw new Error("Could not load reports");
-        }
-
+        if (!response.ok) return;
         const data = await response.json();
         const reportList = Array.isArray(data?.reports)
           ? data.reports
           : Array.isArray(data)
           ? data
           : [];
-
-        if (!isMounted) {
-          return;
+        if (!ignore) {
+          setReports(
+            reportList.map((report) => ({
+              ...report,
+              id: report.id,
+              type: report.issue_type || report.type || "Waterlogged Road",
+              issue_type: report.issue_type || report.type || "Waterlogged Road",
+              location: report.location || "Reported location",
+              latitude: Number(report.latitude),
+              longitude: Number(report.longitude),
+              severity: String(report.severity || "MEDIUM").toUpperCase(),
+              status: report.status || "Reported",
+              position: [
+                Number(report.latitude),
+                Number(report.longitude),
+              ],
+            }))
+          );
         }
-
-        setReports(
-          reportList.map((report) => ({
-            ...report,
-            id: report.id,
-            type: report.issue_type || report.type || "Waterlogged Road",
-            issue_type: report.issue_type || report.type || "Waterlogged Road",
-            location: report.location || "Reported location",
-            latitude: Number(report.latitude),
-            longitude: Number(report.longitude),
-            severity: String(report.severity || "MEDIUM").toUpperCase(),
-            status: report.status || "Reported",
-            position: [
-              Number(report.latitude),
-              Number(report.longitude),
-            ],
-          }))
-        );
       } catch (error) {
-        if (!isMounted) {
-          return;
-        }
-
         console.error("Report loading failed:", error);
-        setReports([]);
       }
-    };
-
-    void fetchReports();
-
+    }
+    void fetchInitialReports();
     return () => {
-      isMounted = false;
+      ignore = true;
     };
-  }, [apiBaseUrl, loadReports]);
+  }, [apiBaseUrl]);
+
+
 
 
   // ------------------------------------
@@ -893,8 +887,7 @@ useEffect(() => {
   // RAIN IMPACT
   // ------------------------------------
 
-  function getRainFactor() {
-
+  const getRainFactor = useCallback(() => {
     const riskRainfall =
       selectedDestination &&
       selectedDestination.weather &&
@@ -918,158 +911,115 @@ useEffect(() => {
     }
 
     return 0;
-
-  }
-
-
-  // ------------------------------------
-  // REPORT IMPACT
-  // ------------------------------------
-
-  function getSeverityPoints(
-    severity
-  ) {
-
-    if (severity === "HIGH") {
-      return 20;
-    }
-
-    if (severity === "MEDIUM") {
-      return 12;
-    }
-
-    return 5;
-
-  }
+  }, [selectedDestination, rainfall]);
 
 
   // ------------------------------------
-  // ROAD RISK
+  // ROAD REPORT STATS & DYNAMIC STYLING
   // ------------------------------------
 
-  function getRoadRisk(
-    feature
-  ) {
+  const getRoadReportStats = useCallback(
+    (feature) => {
+      const roadType = feature?.properties?.highway || "tertiary";
+      let baseRisk = 35;
 
-    const roadType =
-      feature?.properties?.highway ||
-      "tertiary";
-
-
-    let risk = 35;
-
-
-    if (roadType === "trunk") {
-      risk = 48;
-    }
-
-    else if (roadType === "primary") {
-      risk = 44;
-    }
-
-    else if (roadType === "secondary") {
-      risk = 40;
-    }
-
-    else if (roadType === "tertiary") {
-      risk = 35;
-    }
-
-
-    // Rainfall contribution
-    risk += getRainFactor();
-
-
-    // Road coordinates
-    const coordinates =
-      feature.geometry?.coordinates || [];
-
-
-    // Check reports near this road
-    reports.forEach((report) => {
-
-      const reportLat =
-        report.position[0];
-
-      const reportLng =
-        report.position[1];
-
-
-      const nearby =
-        coordinates.some(
-          (point) => {
-
-            const roadLng =
-              point[0];
-
-            const roadLat =
-              point[1];
-
-
-            const distance =
-              Math.sqrt(
-
-                (reportLat - roadLat) ** 2 +
-
-                (reportLng - roadLng) ** 2
-
-              );
-
-
-            return distance < 0.004;
-
-          }
-        );
-
-
-      if (nearby) {
-
-        risk += getSeverityPoints(
-          report.severity
-        );
-
+      if (roadType === "trunk") {
+        baseRisk = 48;
+      } else if (roadType === "primary") {
+        baseRisk = 44;
+      } else if (roadType === "secondary") {
+        baseRisk = 40;
+      } else if (roadType === "tertiary") {
+        baseRisk = 35;
       }
 
-    });
+      baseRisk += getRainFactor();
 
+      const coordinates = feature?.geometry?.coordinates || [];
+      const nearbyReports = [];
+      let highCount = 0;
+      let mediumCount = 0;
+      let lowCount = 0;
+      let reportRiskBonus = 0;
 
-    return Math.min(
-      100,
-      Math.round(risk)
-    );
+      reports.forEach((report) => {
+        const reportLat = report.position[0];
+        const reportLng = report.position[1];
 
-  }
+        const nearby = coordinates.some((point) => {
+          const roadLng = point[0];
+          const roadLat = point[1];
+          const distanceSq =
+            (reportLat - roadLat) ** 2 + (reportLng - roadLng) ** 2;
 
+          // Proximity threshold ~0.005 degrees (~500m)
+          return distanceSq < 0.000025;
+        });
 
-  // ------------------------------------
-  // RISK LABEL
-  // ------------------------------------
+        if (nearby) {
+          nearbyReports.push(report);
+          const sev = String(report.severity).toUpperCase();
+          if (sev === "HIGH") {
+            highCount += 1;
+            reportRiskBonus += 25;
+          } else if (sev === "MEDIUM") {
+            mediumCount += 1;
+            reportRiskBonus += 15;
+          } else {
+            lowCount += 1;
+            reportRiskBonus += 5;
+          }
+        }
+      });
 
-  function getRiskLabel(
-    risk
-  ) {
+      const reportCount = nearbyReports.length;
+      const totalRisk = Math.min(100, Math.round(baseRisk + reportRiskBonus));
 
-    if (risk >= 80) {
-      return "HIGH";
-    }
+      let color = "#16a34a"; // Green for safe / low risk
+      let severityLabel = "LOW";
+      let lineWeight = 2.5;
+      let lineOpacity = 0.7;
 
-    if (risk >= 50) {
-      return "MODERATE";
-    }
+      if (highCount > 0 || totalRisk >= 70) {
+        color = "#dc2626"; // Red for high severity reports or high risk
+        severityLabel = "HIGH";
+        lineWeight = 6;
+        lineOpacity = 0.95;
+      } else if (mediumCount > 0 || totalRisk >= 45) {
+        color = "#f59e0b"; // Orange for medium severity reports or moderate risk
+        severityLabel = "MEDIUM";
+        lineWeight = 4.5;
+        lineOpacity = 0.9;
+      } else if (reportCount > 0) {
+        color = "#22c55e"; // Bright Green for low severity reported roads
+        severityLabel = "LOW";
+        lineWeight = 3.5;
+        lineOpacity = 0.85;
+      }
 
-    return "LOW";
+      return {
+        totalRisk,
+        reportCount,
+        highCount,
+        mediumCount,
+        lowCount,
+        nearbyReports,
+        color,
+        severityLabel,
+        lineWeight,
+        lineOpacity,
+      };
+    },
+    [reports, getRainFactor]
+  );
 
-  }
 
 
   // ------------------------------------
   // VEHICLE STATUS
   // ------------------------------------
 
-  function getVehicleStatus(
-    risk
-  ) {
-
+  function getVehicleStatus(risk) {
     if (risk >= 80) {
       return "Avoid if possible";
     }
@@ -1083,18 +1033,13 @@ useEffect(() => {
     }
 
     return "PASSABLE";
-
   }
-
 
   // ------------------------------------
   // WATER ESTIMATE
   // ------------------------------------
 
-  function getWaterPercentage(
-    risk
-  ) {
-
+  function getWaterPercentage(risk) {
     return Math.min(
       95,
       Math.max(
@@ -1102,129 +1047,110 @@ useEffect(() => {
         Math.round(risk * 0.85)
       )
     );
-
   }
 
-
   // ------------------------------------
-  // ROAD STYLE
-  // ------------------------------------
-
-  function roadStyle() {
-    return {
-      color: "#94a3b8",
-      weight: 2,
-      opacity: 0.55,
-
-    };
-
-  }
-
-
-  // ------------------------------------
-  // ROAD POPUP
+  // DYNAMIC ROAD STYLE
   // ------------------------------------
 
-  function onEachRoad(
-    feature,
-    layer
-  ) {
-
-    const risk =
-      getRoadRisk(feature);
-
-
-    const roadName =
-      feature?.properties?.name ||
-      "Unnamed road";
-
-
-    const waterPercentage =
-      getWaterPercentage(
-        risk
-      );
-
-
-    const vehicleStatus =
-      getVehicleStatus(
-        risk
-      );
-
-
-    layer.bindPopup(`
-
-      <div style="min-width:210px">
-
-        <strong style="font-size:15px">
-          ${roadName}
-        </strong>
-
-        <br />
-
-        <span>
-          Water accumulation:
-          <strong>
-            ${waterPercentage}%
-          </strong>
-        </span>
-
-        <br />
-
-        <span>
-          Risk:
-          <strong>
-            ${getRiskLabel(risk)}
-          </strong>
-        </span>
-
-        <br />
-
-        <span>
-          Risk score:
-          ${risk}/100
-        </span>
-
-        <br />
-
-        <span>
-          Vehicle access:
-          <strong>
-            ${vehicleStatus}
-          </strong>
-        </span>
-
-        <br />
-
-        <span>
-          Rain forecast:
-          ${selectedDestination && selectedDestination.weather && isWithinHyderabad(selectedDestination.latitude, selectedDestination.longitude) ? selectedDestination.weather.next_6_hours_rain : rainfall} mm
-        </span>
-
-        <br /><br />
-
-        <small>
-          Prototype risk estimate based on
-          rainfall and nearby reports.
-        </small>
-
-      </div>
-
-    `);
-
-  }
-
+  const roadStyle = useCallback(
+    (feature) => {
+      const stats = getRoadReportStats(feature);
+      return {
+        color: stats.color,
+        weight: stats.lineWeight,
+        opacity: stats.lineOpacity,
+      };
+    },
+    [getRoadReportStats]
+  );
 
   // ------------------------------------
-  // COUNT HIGH RISK ROADS
+  // ROAD POPUP WITH REPORT COUNTS
   // ------------------------------------
 
-  const highRiskRoadCount =
-    roadData
-      ? roadData.features.filter(
-          (feature) =>
-            getRoadRisk(feature) >= 80
-        ).length
-      : 0;
+  const onEachRoad = useCallback(
+    (feature, layer) => {
+      const stats = getRoadReportStats(feature);
+      const roadName = feature?.properties?.name || "Unnamed road";
+      const waterPercentage = getWaterPercentage(stats.totalRisk);
+      const vehicleStatus = getVehicleStatus(stats.totalRisk);
+
+      const rainForecast =
+        selectedDestination &&
+        selectedDestination.weather &&
+        isWithinHyderabad(
+          selectedDestination.latitude,
+          selectedDestination.longitude
+        )
+          ? selectedDestination.weather.next_6_hours_rain
+          : rainfall;
+
+      const reportBadge =
+        stats.reportCount > 0
+          ? `<div style="margin-top:6px; padding:6px 10px; background:${stats.color}22; border-left:4px solid ${stats.color}; border-radius:4px;">
+               <strong style="color:${stats.color}; font-size:13px;">🚨 ${stats.reportCount} Community Report${stats.reportCount > 1 ? "s" : ""}</strong>
+               <div style="font-size:11px; margin-top:2px;">
+                 ${stats.highCount > 0 ? `<span style="color:#dc2626; font-weight:bold;">${stats.highCount} HIGH</span> ` : ""}
+                 ${stats.mediumCount > 0 ? `<span style="color:#d97706; font-weight:bold;">${stats.mediumCount} MEDIUM</span> ` : ""}
+                 ${stats.lowCount > 0 ? `<span style="color:#16a34a; font-weight:bold;">${stats.lowCount} LOW</span>` : ""}
+               </div>
+             </div>`
+          : `<div style="margin-top:6px;"><span style="color:#16a34a; font-weight:600;">✓ 0 Community Reports (Passable)</span></div>`;
+
+      const reportDetails =
+        stats.nearbyReports.length > 0
+          ? `<div style="margin-top:8px; max-height:100px; overflow-y:auto; font-size:11px; border-top:1px solid #e2e8f0; padding-top:4px;">
+               <strong>Recent community reports:</strong>
+               ${stats.nearbyReports
+                 .map(
+                   (r) =>
+                     `<div style="margin-top:3px;">
+                        • <strong>${r.type}</strong> (${r.severity}): ${r.location} ${r.description ? `- <em>"${r.description}"</em>` : ""}
+                      </div>`
+                 )
+                 .join("")}
+             </div>`
+          : "";
+
+      layer.bindPopup(`
+        <div style="min-width:220px; font-family: system-ui, -apple-system, sans-serif;">
+          <strong style="font-size:15px; color:#0f172a;">${roadName}</strong>
+          ${reportBadge}
+          <div style="margin-top:8px; font-size:12px; line-height:1.5;">
+            <span>Water accumulation: <strong>${waterPercentage}%</strong></span><br />
+            <span>Risk severity: <strong style="color:${stats.color}">${stats.severityLabel}</strong> (${stats.totalRisk}/100)</span><br />
+            <span>Vehicle access: <strong>${vehicleStatus}</strong></span><br />
+            <span>Rain forecast: ${rainForecast} mm</span>
+          </div>
+          ${reportDetails}
+          <div style="margin-top:8px; font-size:10px; color:#64748b; border-top:1px solid #f1f5f9; padding-top:4px;">
+            Dynamic road status based on live community reports & forecast rainfall.
+          </div>
+        </div>
+      `);
+    },
+    [getRoadReportStats, selectedDestination, rainfall]
+  );
+
+  // ------------------------------------
+  // COUNT HIGH RISK ROADS & AFFECTED ROADS
+  // ------------------------------------
+
+  const highRiskRoadCount = useMemo(() => {
+    if (!roadData) return 0;
+    return roadData.features.filter(
+      (feature) => getRoadReportStats(feature).severityLabel === "HIGH"
+    ).length;
+  }, [roadData, getRoadReportStats]);
+
+  const affectedRoadsCount = useMemo(() => {
+    if (!roadData) return 0;
+    return roadData.features.filter(
+      (feature) => getRoadReportStats(feature).reportCount > 0
+    ).length;
+  }, [roadData, getRoadReportStats]);
+
 
   const prototypeRoadSegments = useMemo(() => {
     if (!roadData) {
@@ -2092,7 +2018,12 @@ useEffect(() => {
               {highRiskRoadCount}
             </strong>
 
+            <small>
+              {affectedRoadsCount} road{affectedRoadsCount === 1 ? "" : "s"} with reports
+            </small>
+
           </div>
+
 
 
           <div className="stat-card">
@@ -2270,7 +2201,7 @@ useEffect(() => {
 
                 <GeoJSON
 
-                  key={`${rainfall}-${reports.length}`}
+                  key={`roads-${rainfall}-${reports.length}-${reports.map((r) => `${r.id}_${r.severity}`).join("-")}`}
 
                   data={roadData}
 
