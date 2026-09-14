@@ -29,6 +29,73 @@ const SATELLITE_DATE = new Date(
 const NASA_GIBS_TILE_URL =
   `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_NOAA20_CorrectedReflectance_TrueColor/default/${SATELLITE_DATE}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`;
 
+const INITIAL_DEMO_REPORTS = [
+  {
+    id: "demo-1",
+    type: "Waterlogged Road",
+    issue_type: "Waterlogged Road",
+    location: "Gachibowli Flyover",
+    latitude: 17.4436,
+    longitude: 78.3520,
+    severity: "HIGH",
+    description: "Deep waterlogging on main road near flyover pillar 12. Water depth approx 1.5 ft.",
+    status: "Reported",
+    position: [17.4436, 78.3520],
+    isDemo: true,
+  },
+  {
+    id: "demo-2",
+    type: "Blocked Drain",
+    issue_type: "Blocked Drain",
+    location: "Gachibowli Main Road",
+    latitude: 17.4442,
+    longitude: 78.3525,
+    severity: "MEDIUM",
+    description: "Stormwater drain clogged with debris causing road overflow.",
+    status: "Reported",
+    position: [17.4442, 78.3525],
+    isDemo: true,
+  },
+  {
+    id: "demo-3",
+    type: "Waterlogged Road",
+    issue_type: "Waterlogged Road",
+    location: "Madhapur Main Road",
+    latitude: 17.4486,
+    longitude: 78.3908,
+    severity: "MEDIUM",
+    description: "Waterlogging near Metro station entrance.",
+    status: "Reported",
+    position: [17.4486, 78.3908],
+    isDemo: true,
+  },
+  {
+    id: "demo-4",
+    type: "Waterlogged Road",
+    issue_type: "Waterlogged Road",
+    location: "Begumpet Underpass",
+    latitude: 17.4375,
+    longitude: 78.4683,
+    severity: "HIGH",
+    description: "Severe flooding under railway bridge, traffic halted.",
+    status: "Reported",
+    position: [17.4375, 78.4683],
+    isDemo: true,
+  },
+  {
+    id: "demo-5",
+    type: "Open Drain Cover",
+    issue_type: "Open Drain Cover",
+    location: "Kukatpally Housing Board",
+    latitude: 17.4849,
+    longitude: 78.3888,
+    severity: "LOW",
+    description: "Manhole cover displaced on side lane.",
+    status: "Reported",
+    position: [17.4849, 78.3888],
+    isDemo: true,
+  },
+];
 
 function isWithinHyderabad(latitude, longitude) {
   return (
@@ -82,14 +149,174 @@ function getReportRoadStatus(severity) {
 
 
 function createReportIcon(severity) {
+  const sevClass = String(severity || "MEDIUM").toLowerCase();
+  const label = `⚠️ ${severity} Warning`;
   return divIcon({
     className: "report-marker-icon",
-    html: `<span class="report-marker ${severity.toLowerCase()}"></span>`,
-    iconSize: [24, 24],
-    iconAnchor: [12, 12],
-    popupAnchor: [0, -12],
+    html: `<div class="report-marker-badge single ${sevClass}">${label}</div>`,
+    iconSize: [120, 30],
+    iconAnchor: [60, 15],
+    popupAnchor: [0, -15],
   });
 }
+
+
+function groupReportsIntoClusters(reportsList, threshold = 0.004) {
+  const clusters = [];
+  const visited = new Set();
+
+  reportsList.forEach((report, i) => {
+    if (visited.has(report.id)) return;
+
+    const clusterReports = [report];
+    visited.add(report.id);
+
+    reportsList.forEach((otherReport, j) => {
+      if (i === j || visited.has(otherReport.id)) return;
+
+      const distSq =
+        (report.latitude - otherReport.latitude) ** 2 +
+        (report.longitude - otherReport.longitude) ** 2;
+
+      if (distSq <= threshold ** 2) {
+        clusterReports.push(otherReport);
+        visited.add(otherReport.id);
+      }
+    });
+
+    const avgLat =
+      clusterReports.reduce((sum, r) => sum + r.latitude, 0) /
+      clusterReports.length;
+    const avgLng =
+      clusterReports.reduce((sum, r) => sum + r.longitude, 0) /
+      clusterReports.length;
+
+    const severityCounts = { HIGH: 0, MEDIUM: 0, LOW: 0 };
+    clusterReports.forEach((r) => {
+      const sev = String(r.severity).toUpperCase();
+      if (sev === "HIGH") severityCounts.HIGH += 1;
+      else if (sev === "MEDIUM") severityCounts.MEDIUM += 1;
+      else severityCounts.LOW += 1;
+    });
+
+    let highestSeverity = "LOW";
+    if (severityCounts.HIGH > 0) highestSeverity = "HIGH";
+    else if (severityCounts.MEDIUM > 0) highestSeverity = "MEDIUM";
+
+    const issueTypes = [
+      ...new Set(
+        clusterReports.map((r) => r.issue_type || r.type || "Waterlogged Road")
+      ),
+    ];
+
+    clusters.push({
+      id: `cluster-${report.id}-${clusterReports.length}`,
+      center: [avgLat, avgLng],
+      reports: clusterReports,
+      count: clusterReports.length,
+      highestSeverity,
+      severityCounts,
+      issueTypes,
+      locationName: report.location || "Reported Location",
+    });
+  });
+
+  return clusters;
+}
+
+
+function createReportClusterIcon(cluster) {
+  const sevClass = cluster.highestSeverity.toLowerCase();
+  const label =
+    cluster.count > 1
+      ? `👥 ${cluster.count} people reported this`
+      : `👤 1 Community Report`;
+
+  const extraClass = cluster.count > 1 ? "cluster" : "single";
+
+  return divIcon({
+    className: "report-marker-icon",
+    html: `<div class="report-marker-badge ${extraClass} ${sevClass}">${label}</div>`,
+    iconSize: [cluster.count > 1 ? 165 : 135, 32],
+    iconAnchor: [cluster.count > 1 ? 82 : 67, 16],
+    popupAnchor: [0, -16],
+  });
+}
+
+
+function renderClusterPopup(cluster) {
+  const title =
+    cluster.count > 1
+      ? `👥 ${cluster.count} People Reported a Problem Here`
+      : `👤 Community Member Report`;
+
+  const roadStatusText = getReportRoadStatus(cluster.highestSeverity);
+
+  const sevBreakdown = [];
+  if (cluster.severityCounts.HIGH > 0) {
+    sevBreakdown.push(
+      `<span style="color:#dc2626; font-weight:bold;">${cluster.severityCounts.HIGH} HIGH</span>`
+    );
+  }
+  if (cluster.severityCounts.MEDIUM > 0) {
+    sevBreakdown.push(
+      `<span style="color:#d97706; font-weight:bold;">${cluster.severityCounts.MEDIUM} MEDIUM</span>`
+    );
+  }
+  if (cluster.severityCounts.LOW > 0) {
+    sevBreakdown.push(
+      `<span style="color:#16a34a; font-weight:bold;">${cluster.severityCounts.LOW} LOW</span>`
+    );
+  }
+
+  const reportsListHtml = cluster.reports
+    .map((r) => {
+      const desc = r.description
+        ? `<br/><span style="color:#475467; font-style:italic;">"${r.description}"</span>`
+        : "";
+      return `<div style="margin-top:6px; padding:6px 8px; background:#f8fafc; border-radius:6px; border-left:3px solid ${
+        r.severity === "HIGH"
+          ? "#dc2626"
+          : r.severity === "MEDIUM"
+          ? "#f59e0b"
+          : "#16a34a"
+      }; font-size:12px;">
+        <strong>${r.type || r.issue_type}</strong> (${r.severity}) • <em>${
+        r.location
+      }</em>
+        ${desc}
+      </div>`;
+    })
+    .join("");
+
+  return `
+    <div style="min-width:240px; max-width:320px; font-family: system-ui, -apple-system, sans-serif;">
+      <div style="font-size:14px; font-weight:700; color:#0f172a; border-bottom:1px solid #e2e8f0; padding-bottom:6px; margin-bottom:6px;">
+        ${title}
+      </div>
+      <div style="font-size:12px; margin-bottom:4px;">
+        📍 <strong>Location:</strong> ${cluster.locationName}
+      </div>
+      <div style="font-size:12px; margin-bottom:4px;">
+        🚦 <strong>Road status:</strong> ${roadStatusText}
+      </div>
+      <div style="font-size:12px; margin-bottom:4px;">
+        ⚠️ <strong>Issue types:</strong> ${cluster.issueTypes.join(", ")}
+      </div>
+      <div style="font-size:12px; margin-bottom:8px;">
+        📊 <strong>Severity breakdown:</strong> ${sevBreakdown.join(", ")}
+      </div>
+      <div style="font-size:12px; font-weight:600; color:#334155; margin-bottom:4px;">
+        Detailed Community Reports (${cluster.count}):
+      </div>
+      <div style="max-height:160px; overflow-y:auto; padding-right:2px;">
+        ${reportsListHtml}
+      </div>
+    </div>
+  `;
+}
+
+
 
 
 // ------------------------------------
@@ -701,7 +928,7 @@ useEffect(() => {
   // REPORTS
   // ------------------------------------
 
-  const [reports, setReports] = useState([]);
+  const [reports, setReports] = useState(INITIAL_DEMO_REPORTS);
 
   const loadReports = useCallback(async () => {
     try {
@@ -717,25 +944,27 @@ useEffect(() => {
         ? data
         : [];
 
-      setReports(
-        reportList.map((report) => ({
-          ...report,
-          id: report.id,
-          type: report.issue_type || report.type || "Waterlogged Road",
-          issue_type: report.issue_type || report.type || "Waterlogged Road",
-          location: report.location || "Reported location",
-          latitude: Number(report.latitude),
-          longitude: Number(report.longitude),
-          severity: String(report.severity || "MEDIUM").toUpperCase(),
-          status: report.status || "Reported",
-          position: [
-            Number(report.latitude),
-            Number(report.longitude),
-          ],
-        }))
-      );
+      const formattedBackend = reportList.map((report) => ({
+        ...report,
+        id: `backend-${report.id}`,
+        type: report.issue_type || report.type || "Waterlogged Road",
+        issue_type: report.issue_type || report.type || "Waterlogged Road",
+        location: report.location || "Reported location",
+        latitude: Number(report.latitude),
+        longitude: Number(report.longitude),
+        severity: String(report.severity || "MEDIUM").toUpperCase(),
+        status: report.status || "Reported",
+        position: [
+          Number(report.latitude),
+          Number(report.longitude),
+        ],
+        isDemo: false,
+      }));
+
+      setReports([...formattedBackend, ...INITIAL_DEMO_REPORTS]);
     } catch (error) {
-      console.error("Report loading failed:", error);
+      console.error("Report loading failed, retaining demo reports:", error);
+      setReports(INITIAL_DEMO_REPORTS);
     }
   }, [apiBaseUrl, setReports]);
 
@@ -752,23 +981,24 @@ useEffect(() => {
           ? data
           : [];
         if (!ignore) {
-          setReports(
-            reportList.map((report) => ({
-              ...report,
-              id: report.id,
-              type: report.issue_type || report.type || "Waterlogged Road",
-              issue_type: report.issue_type || report.type || "Waterlogged Road",
-              location: report.location || "Reported location",
-              latitude: Number(report.latitude),
-              longitude: Number(report.longitude),
-              severity: String(report.severity || "MEDIUM").toUpperCase(),
-              status: report.status || "Reported",
-              position: [
-                Number(report.latitude),
-                Number(report.longitude),
-              ],
-            }))
-          );
+          const formattedBackend = reportList.map((report) => ({
+            ...report,
+            id: `backend-${report.id}`,
+            type: report.issue_type || report.type || "Waterlogged Road",
+            issue_type: report.issue_type || report.type || "Waterlogged Road",
+            location: report.location || "Reported location",
+            latitude: Number(report.latitude),
+            longitude: Number(report.longitude),
+            severity: String(report.severity || "MEDIUM").toUpperCase(),
+            status: report.status || "Reported",
+            position: [
+              Number(report.latitude),
+              Number(report.longitude),
+            ],
+            isDemo: false,
+          }));
+
+          setReports([...formattedBackend, ...INITIAL_DEMO_REPORTS]);
         }
       } catch (error) {
         console.error("Report loading failed:", error);
@@ -779,6 +1009,11 @@ useEffect(() => {
       ignore = true;
     };
   }, [apiBaseUrl]);
+
+  const reportClusters = useMemo(() => {
+    return groupReportsIntoClusters(reports);
+  }, [reports]);
+
 
 
 
@@ -2265,63 +2500,25 @@ useEffect(() => {
               )}
 
 
-              {/* REPORT MARKERS */}
+              {/* REPORT MARKERS & CLUSTERS */}
 
-              {showingHyderabadRoads && reports.map(
-                (report) => (
-
+              {showingHyderabadRoads &&
+                reportClusters.map((cluster) => (
                   <Marker
-                    key={report.id}
-                    position={
-                      report.position
-                    }
-                    icon={createReportIcon(report.severity)}
+                    key={cluster.id}
+                    position={cluster.center}
+                    icon={createReportClusterIcon(cluster)}
                   >
-
                     <Popup>
-
-                      <strong>Reported waterlogging</strong>
-
-                      <br />
-
-                      Location:
-                      {" "}
-                      {report.location}
-
-                      <br />
-
-                      Severity:
-                      {" "}
-                      {report.severity}
-
-                      <br />
-
-                      Road status:
-                      {" "}
-                      {getReportRoadStatus(report.severity)}
-
-                      <br />
-
-                      {" "}
-                      {report.status}
-                      Existing report status:
-                      {" "}
-                      {report.status}
-
-                      <br />
-
-                      Reported issue:
-                      {" "}
-                      {report.type}
-                      {" "}
-                      {report.status}
-
+                      <div
+                        dangerouslySetInnerHTML={{
+                          __html: renderClusterPopup(cluster),
+                        }}
+                      />
                     </Popup>
-
                   </Marker>
+                ))}
 
-                )
-              )}
 
 
               {selectedDestination && (

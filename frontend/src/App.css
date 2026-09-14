@@ -933,3 +933,56 @@ main {
   color: #15803d;
   background: #dcfce7;
 }
+
+/* =========================
+   REPORT MARKERS & CLUSTERS
+   ========================= */
+
+.report-marker-icon {
+  background: none;
+  border: none;
+}
+
+.report-marker-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 20px;
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  color: #ffffff;
+  white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  position: relative;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  user-select: none;
+}
+
+.report-marker-badge:hover {
+  transform: scale(1.08);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+.report-marker-badge.high {
+  background: linear-gradient(135deg, #dc2626, #b91c1c);
+  border: 2px solid #ffffff;
+}
+
+.report-marker-badge.medium {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  border: 2px solid #ffffff;
+}
+
+.report-marker-badge.low {
+  background: linear-gradient(135deg, #16a34a, #15803d);
+  border: 2px solid #ffffff;
+}
+
+.report-marker-badge.cluster {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
